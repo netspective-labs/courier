@@ -8,9 +8,10 @@ It has three main goals:
 1. Treat “data movement” (ETL/ELT, CDC, streaming, batch, etc.) as a first-class
    concept in Courier, not just ad-hoc scripts.
 2. Provide a small, composable TypeScript API that can be used directly in Deno,
-   but is generic enough to be wrapped by higher-level markdown playbooks and notebooks.
-3. Make Singer and Airbyte “first-class citizens” of the Courier world, while still
-   treating them as profiles within a more general Data Movement Protocol
+   but is generic enough to be wrapped by higher-level markdown playbooks and
+   notebooks.
+3. Make Singer and Airbyte “first-class citizens” of the Courier world, while
+   still treating them as profiles within a more general Data Movement Protocol
    (DataMP).
 
 In other words: Courier is the infrastructure layer; pipelines and markdown
@@ -138,8 +139,7 @@ This is the bridge between:
 
 - Strongly typed data models (per stream, using Zod).
   - Profile-specific representations on the wire (Singer, Airbyte, Data Move
-    superset,
-  etc.).
+    superset, etc.).
 
 ### Typed Data Move messages
 
