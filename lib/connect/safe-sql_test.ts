@@ -86,6 +86,35 @@ Deno.test("SchemaSQLBuilder.count().where() honors operators", () => {
   );
 });
 
+Deno.test("SchemaSelectBuilder honors dialect-specific limit clauses", () => {
+  const schema = z.object({ id: z.number(), label: z.string() });
+  const builder = new SchemaSQLBuilder("items", schema);
+  const query = builder
+    .select(["id"])
+    .usingDialect("postgres")
+    .limit(2)
+    .offset(5)
+    .sql();
+  const safe = query.safe();
+  assertStringIncludes(safe.text, "OFFSET $1 ROWS");
+  assertStringIncludes(safe.text, "FETCH NEXT $2 ROWS ONLY");
+  assertEquals(safe.values, [5, 2]);
+});
+
+Deno.test("SchemaSelectBuilder supports typed column aliases and fragments", () => {
+  const schema = z.object({ id: z.number(), label: z.string() });
+  const builder = new SchemaSQLBuilder("items", schema);
+  const query = builder.select([
+    ["id", "item_id"],
+    "label",
+    SQL`upper(label) AS label_upper`,
+  ]).sql();
+  const safe = query.safe();
+  assertStringIncludes(safe.text, "id AS item_id");
+  assertStringIncludes(safe.text, "label");
+  assertStringIncludes(safe.text, "upper(label) AS label_upper");
+});
+
 Deno.test("SchemaSelectBuilder composes CTEs, joins, and clauses", () => {
   const schema = z.object({ id: z.number(), label: z.string() });
   const builder = new SchemaSQLBuilder("items", schema);

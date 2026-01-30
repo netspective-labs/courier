@@ -11,6 +11,50 @@ import {
 } from "./sql-text.ts";
 import { CourierError, CourierMeta } from "./core.ts";
 
+export type Dialect = "sqlite" | "postgres" | "generic";
+type LimitValue = number | SQL;
+
+export interface DialectConfig {
+  limitOffset?: (
+    limit?: LimitValue,
+    offset?: LimitValue,
+  ) => SQL | undefined;
+}
+
+const DIALECT_CONFIGS: Record<Dialect, DialectConfig> = {
+  sqlite: {
+    limitOffset: (limit?: LimitValue, offset?: LimitValue) => {
+      const parts: SQL[] = [];
+      if (limit !== undefined) parts.push(sqlTemplate`limit ${limit}`);
+      if (offset !== undefined) parts.push(sqlTemplate`offset ${offset}`);
+      if (!parts.length) return undefined;
+      return joinSQLParts(parts, " ");
+    },
+  },
+  postgres: {
+    limitOffset: (limit?: LimitValue, offset?: LimitValue) => {
+      const parts: SQL[] = [];
+      if (offset !== undefined) {
+        parts.push(sqlTemplate`OFFSET ${offset} ROWS`);
+      }
+      if (limit !== undefined) {
+        parts.push(sqlTemplate`FETCH NEXT ${limit} ROWS ONLY`);
+      }
+      if (!parts.length) return undefined;
+      return joinSQLParts(parts, " ");
+    },
+  },
+  generic: {
+    limitOffset: (limit?: LimitValue, offset?: LimitValue) => {
+      const parts: SQL[] = [];
+      if (limit !== undefined) parts.push(sqlTemplate`limit ${limit}`);
+      if (offset !== undefined) parts.push(sqlTemplate`offset ${offset}`);
+      if (!parts.length) return undefined;
+      return joinSQLParts(parts, " ");
+    },
+  },
+};
+
 export type SchemaColumnInfo = {
   table?: string;
   name: string;
@@ -52,7 +96,25 @@ export type SchemaWhereInput<T extends z.ZodRawShape> =
   | SQL
   | SchemaWhereFilter<T>;
 
+export type SchemaColumnAlias<T extends z.ZodRawShape> =
+  readonly [keyof z.input<z.ZodObject<T>>, string];
+
+export type SchemaSelectColumn<T extends z.ZodRawShape> =
+  | keyof z.input<z.ZodObject<T>>
+  | SchemaColumnAlias<T>
+  | SQL;
+
 const DEFAULT_TYPE = z.unknown();
+const DEFAULT_DIALECT: Dialect = "sqlite";
+
+function buildLimitOffsetClause(
+  limit: LimitValue | undefined,
+  offset: LimitValue | undefined,
+  dialect: Dialect,
+): SQL | undefined {
+  const config = DIALECT_CONFIGS[dialect];
+  return config.limitOffset?.(limit, offset);
+}
 
 function normalizeTypeKey(type?: string): string {
   return (type ?? "").trim().toLowerCase();
@@ -286,17 +348,31 @@ type OrderByKey<T extends z.ZodRawShape> =
   | SQL
   | string;
 
-function buildColumnClause(
+function columnSpecToSQL<T extends z.ZodRawShape>(
+  spec: SchemaSelectColumn<T>,
+): SQL {
+  if (isSQL(spec)) {
+    return spec;
+  }
+  if (Array.isArray(spec)) {
+    const [column, alias] = spec;
+    return sqlTemplate`${sqlRaw`${sqlIdent(String(column))}`} AS ${sqlRaw`${sqlIdent(alias)}`}`;
+  }
+  return sqlTemplate`${sqlRaw`${sqlIdent(String(spec))}`}`;
+}
+
+function buildColumnClause<T extends z.ZodRawShape>(
   mode: SchemaSelectMode,
-  columns?: readonly string[] | undefined,
+  columns?: readonly SchemaSelectColumn<T>[],
 ): SQL {
   if (mode === "count") {
     return sqlTemplate`count(*)`;
   }
-  if (columns && columns.length) {
-    return sqlTemplate`${sqlRaw`${colList(columns)}`}`;
+  if (!columns || !columns.length) {
+    return sqlTemplate`*`;
   }
-  return sqlTemplate`*`;
+  const parts = columns.map((col) => columnSpecToSQL(col));
+  return joinSQLParts(parts, ", ");
 }
 
 function buildJoinSQL(join: JoinDefinition): SQL {
@@ -361,17 +437,14 @@ export class SchemaSQLBuilder<T extends z.ZodRawShape> {
     return deleteFromSchema(this.table, this.schema, where, options);
   }
 
-  select<K extends readonly (keyof z.input<typeof this.schema>)[]>(
-    columns?: K,
+  select(
+    columns?: readonly SchemaSelectColumn<T>[],
     options?: SchemaSelectOptions,
   ): SchemaSelectBuilder<T> {
-    const columnNames = columns && columns.length
-      ? columns.map((col) => String(col))
-      : undefined;
     return new SchemaSelectBuilder(
       this.table,
       this.schema,
-      columnNames,
+      columns,
       options,
       "select",
     );
@@ -389,9 +462,10 @@ export class SchemaSQLBuilder<T extends z.ZodRawShape> {
 }
 
 export class SchemaSelectBuilder<T extends z.ZodRawShape> {
-  private readonly columnNames?: readonly string[];
+  private readonly columns?: readonly SchemaSelectColumn<T>[];
   private readonly distinctClause: SQL;
   private readonly mode: SchemaSelectMode;
+  private dialect: Dialect;
 
   private readonly ctes: CTEClause[] = [];
   private readonly joins: JoinDefinition[] = [];
@@ -399,21 +473,23 @@ export class SchemaSelectBuilder<T extends z.ZodRawShape> {
   private readonly groupings: SQL[] = [];
   private havingClause?: SQL;
   private readonly orderings: SQL[] = [];
-  private limitClause?: SQL;
-  private offsetClause?: SQL;
+  private limitValue?: LimitValue;
+  private offsetValue?: LimitValue;
 
   constructor(
     private readonly table: string,
     private readonly schema: z.ZodObject<T>,
-    columns?: readonly string[],
+    columns?: readonly SchemaSelectColumn<T>[],
     options?: SchemaSelectOptions,
     mode: SchemaSelectMode = "select",
+    dialect: Dialect = DEFAULT_DIALECT,
   ) {
-    this.columnNames = columns;
+    this.columns = columns;
     this.mode = mode;
     this.distinctClause = options?.distinct && mode === "select"
       ? sqlTemplate`DISTINCT `
       : sqlTemplate``;
+    this.dialect = dialect;
   }
 
   with(
@@ -488,17 +564,22 @@ export class SchemaSelectBuilder<T extends z.ZodRawShape> {
   }
 
   limit(value: number | SQL): this {
-    this.limitClause = sqlTemplate`limit ${value}`;
+    this.limitValue = value;
     return this;
   }
 
   offset(value: number | SQL): this {
-    this.offsetClause = sqlTemplate`offset ${value}`;
+    this.offsetValue = value;
+    return this;
+  }
+
+  usingDialect(dialect: Dialect): this {
+    this.dialect = dialect;
     return this;
   }
 
   sql(): SQL {
-    const baseColumns = buildColumnClause(this.mode, this.columnNames);
+    const baseColumns = buildColumnClause(this.mode, this.columns);
     const tableIdent = sqlRaw`${sqlIdent(this.table)}`;
     const main = this.mode === "count"
       ? sqlTemplate`select ${baseColumns} from ${tableIdent}`
@@ -522,11 +603,13 @@ export class SchemaSelectBuilder<T extends z.ZodRawShape> {
       const orderClause = joinSQLParts(this.orderings, ", ");
       statement = sqlTemplate`${statement} order by ${orderClause}`;
     }
-    if (this.limitClause) {
-      statement = sqlTemplate`${statement} ${this.limitClause}`;
-    }
-    if (this.offsetClause) {
-      statement = sqlTemplate`${statement} ${this.offsetClause}`;
+    const limitOffsetClause = buildLimitOffsetClause(
+      this.limitValue,
+      this.offsetValue,
+      this.dialect,
+    );
+    if (limitOffsetClause) {
+      statement = sqlTemplate`${statement} ${limitOffsetClause}`;
     }
 
     const withClause = buildWithClause(this.ctes);
