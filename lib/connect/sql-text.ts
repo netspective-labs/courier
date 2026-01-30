@@ -1,27 +1,32 @@
 /**
  * @module sql-text.ts
- * SQL composition utilities used throughout Courier.
+ * Core SQL composition primitives Courier uses to build, log, and serialize
+ * statements in a consistent, placeholder-safe way.
  *
- * Core services:
- * - `SQL` is the typed tagged template for parameterized queries; call `.safe()` to
- *   get `{ text, values }` suitable for drivers and `.text()` for readable debugging.
- * - `raw` / `sqlRaw` splice verbatim SQL fragments (identifiers, operators, dialect
- *   extensions) without parameterization.
- * - `sqlCat` produces SQLite-style `||` concatenation expressions from mixed literal
- *   and fragment content.
- * - Helpers (`literal`, `inlinedSQL`, `sqlIdent`, `assignments`, etc.) quote,
- *   escape, and format values when assembling expressions and CTEs.
+ * Highlights:
+ * - `SQL` is the strongly typed tagged template that stitches literal fragments,
+ *   nested `SQL` blocks, and helpers like `raw` into a single AST with
+ *   consistent placeholder numbering. Call `.safe()` to get the driver-ready
+ *   `{ text, values }` tuple or `.text()` for diagnostics.
+ * - `raw` / `sqlRaw` let you splice identifiers, operators, dialect extensions,
+ *   and schema-qualified paths verbatim without new placeholders. Pair them with
+ *   `SQL` to guard escapes while still accepting nested fragments and arrays.
+ * - `sqlIdent`, `colList`, `assignments`, and helpers in the lower half of the
+ *   file generate quoted identifiers, column lists, and assignment lists so the
+ *   rest of the system never interpolates raw strings directly.
+ * - `sqlCat` produces SQLite-style `||` concatenation expressions from mixed
+ *   literal / fragment input while keeping placeholder ordering intact.
  *
- * Key ergonomics:
- * - Arrays expand recursively inside `SQL` templates and `raw` fragments.
- * - Nested `SQL`/`raw` fragments merge placeholder numbering so drivers see
- *   continuous `$1`/`:1`/custom identifiers.
- * - `SQLSafeOptions`, `SQLTextOptions`, `SQLLiteralOptions`, and `SQLTextInput`
- *   describe the reusable option shapes for adapters that consume these helpers.
+ * Supplemental utilities:
+ * - `literal`, `inlinedSQL`, and `SQLTextInput` describe how values become
+ *   SQL literals when debugging or when parameters must be inlined for logging.
+ * - `SQLSafeOptions`, `SQLTextOptions`, and `PlaceholderFactory` let consumers
+ *   customize placeholder styles (`$1`, `:1`, `:p1`, …) when drivers demand a
+ *   specific format.
  *
- * Use the unit tests, especially near the bottom of the file, as cookbook-style
- * examples covering custom identifiers, sqlCat nesting, expression helpers, and
- * debug utilities like `inlinedSQL`.
+ * The unit tests toward the bottom of this file double as cookbook examples,
+ * showcasing nested `SQL`, `raw`, `colList`, and `sqlCat` usage without the
+ * verbosity of inlining placeholder tracking your drivers would expect.
  */
 
 /**

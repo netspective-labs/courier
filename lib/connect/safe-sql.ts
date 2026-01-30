@@ -68,6 +68,14 @@ function joinSQLParts(parts: readonly SQL[], separator: string): SQL {
   );
 }
 
+function ensureWhereClause(where: SQL): SQL {
+  const trimmed = where.text().trimStart();
+  if (/^WHERE\b/i.test(trimmed)) {
+    return where;
+  }
+  return sqlTemplate`WHERE ${where}`;
+}
+
 function resolveWhereInput<T extends z.ZodRawShape>(
   schema: z.ZodObject<T>,
   where: SchemaWhereInput<T> | undefined,
@@ -75,7 +83,9 @@ function resolveWhereInput<T extends z.ZodRawShape>(
   if (!where) {
     throw new CourierError("WHERE clause is required");
   }
-  return isSQL(where) ? where : whereClauseFromSchema(schema, where);
+  return isSQL(where)
+    ? ensureWhereClause(where)
+    : whereClauseFromSchema(schema, where);
 }
 
 export function columnsToZodSchema(
@@ -248,6 +258,81 @@ export function deleteFromSchema<
   return statement;
 }
 
+type JoinType = "INNER" | "LEFT" | "RIGHT" | "FULL";
+
+type TableReference = string | SQL;
+
+type SchemaSelectMode = "select" | "count";
+
+interface SchemaSelectOptions {
+  distinct?: boolean;
+}
+
+interface CTEClause {
+  alias: string;
+  query: SQL;
+  columns?: readonly string[];
+}
+
+interface JoinDefinition {
+  table: TableReference;
+  alias?: string;
+  type: JoinType;
+  on: SQL;
+}
+
+type OrderByKey<T extends z.ZodRawShape> =
+  | keyof z.input<z.ZodObject<T>>
+  | SQL
+  | string;
+
+function buildColumnClause(
+  mode: SchemaSelectMode,
+  columns?: readonly string[] | undefined,
+): SQL {
+  if (mode === "count") {
+    return sqlTemplate`count(*)`;
+  }
+  if (columns && columns.length) {
+    return sqlTemplate`${sqlRaw`${colList(columns)}`}`;
+  }
+  return sqlTemplate`*`;
+}
+
+function buildJoinSQL(join: JoinDefinition): SQL {
+  const joinType = sqlRaw`${join.type} JOIN`;
+  const tableExpr = isSQL(join.table)
+    ? join.table
+    : sqlRaw`${sqlIdent(join.table)}`;
+  const aliased = join.alias
+    ? sqlTemplate`${tableExpr} ${sqlRaw`${sqlIdent(join.alias)}`}`
+    : tableExpr;
+  return sqlTemplate`${joinType} ${aliased} ON ${join.on}`;
+}
+
+function buildWithClause(ctes: readonly CTEClause[]): SQL | undefined {
+  if (!ctes.length) {
+    return undefined;
+  }
+  const parts = ctes.map((cte) => {
+    const columns = cte.columns?.length
+      ? sqlTemplate`(${sqlRaw`${colList(cte.columns)}`})`
+      : sqlRaw``;
+    return sqlTemplate`${sqlRaw`${sqlIdent(cte.alias)}`}${columns} AS (${cte.query})`;
+  });
+  const clause = joinSQLParts(parts, ", ");
+  return sqlTemplate`WITH ${clause}`;
+}
+
+function columnToSQL<T extends z.ZodRawShape>(
+  value: OrderByKey<T>,
+): SQL {
+  if (isSQL(value)) {
+    return value;
+  }
+  return sqlTemplate`${sqlRaw`${sqlIdent(String(value))}`}`;
+}
+
 export class SchemaSQLBuilder<T extends z.ZodRawShape> {
   constructor(
     public readonly table: string,
@@ -278,35 +363,177 @@ export class SchemaSQLBuilder<T extends z.ZodRawShape> {
 
   select<K extends readonly (keyof z.input<typeof this.schema>)[]>(
     columns?: K,
-    options?: { distinct?: boolean },
-  ) {
-    const tableIdent = sqlRaw`${sqlIdent(this.table)}`;
+    options?: SchemaSelectOptions,
+  ): SchemaSelectBuilder<T> {
     const columnNames = columns && columns.length
       ? columns.map((col) => String(col))
       : undefined;
-    const columnClause = columnNames
-      ? sqlRaw`${colList(columnNames)}`
-      : sqlRaw`*`;
-    const distinctClause = options?.distinct ? sqlRaw`DISTINCT ` : sqlRaw``;
-    const base = sqlTemplate`select ${distinctClause}${columnClause} from ${tableIdent}`;
-    return {
-      where: (filter: SchemaWhereInput<T>) =>
-        sqlTemplate`${base} ${this.where(filter)}`,
-    };
+    return new SchemaSelectBuilder(
+      this.table,
+      this.schema,
+      columnNames,
+      options,
+      "select",
+    );
   }
 
-  count(options?: { distinct?: boolean }) {
+  count(options?: SchemaSelectOptions): SchemaSelectBuilder<T> {
+    return new SchemaSelectBuilder(
+      this.table,
+      this.schema,
+      undefined,
+      options,
+      "count",
+    );
+  }
+}
+
+export class SchemaSelectBuilder<T extends z.ZodRawShape> {
+  private readonly columnNames?: readonly string[];
+  private readonly distinctClause: SQL;
+  private readonly mode: SchemaSelectMode;
+
+  private readonly ctes: CTEClause[] = [];
+  private readonly joins: JoinDefinition[] = [];
+  private whereClause?: SQL;
+  private readonly groupings: SQL[] = [];
+  private havingClause?: SQL;
+  private readonly orderings: SQL[] = [];
+  private limitClause?: SQL;
+  private offsetClause?: SQL;
+
+  constructor(
+    private readonly table: string,
+    private readonly schema: z.ZodObject<T>,
+    columns?: readonly string[],
+    options?: SchemaSelectOptions,
+    mode: SchemaSelectMode = "select",
+  ) {
+    this.columnNames = columns;
+    this.mode = mode;
+    this.distinctClause = options?.distinct && mode === "select"
+      ? sqlTemplate`DISTINCT `
+      : sqlTemplate``;
+  }
+
+  with(
+    alias: string,
+    query: SQL,
+    opts?: { columns?: readonly string[] },
+  ): this {
+    this.ctes.push({
+      alias,
+      query,
+      columns: opts?.columns,
+    });
+    return this;
+  }
+
+  join(
+    table: TableReference,
+    on: SQL,
+    opts?: { alias?: string; type?: JoinType },
+  ): this {
+    this.joins.push({
+      table,
+      alias: opts?.alias,
+      type: (opts?.type ?? "INNER"),
+      on,
+    });
+    return this;
+  }
+
+  innerJoin(
+    table: TableReference,
+    on: SQL,
+    opts?: { alias?: string },
+  ): this {
+    return this.join(table, on, { alias: opts?.alias, type: "INNER" });
+  }
+
+  leftJoin(
+    table: TableReference,
+    on: SQL,
+    opts?: { alias?: string },
+  ): this {
+    return this.join(table, on, { alias: opts?.alias, type: "LEFT" });
+  }
+
+  where(filter: SchemaWhereInput<T>): this {
+    this.whereClause = resolveWhereInput(this.schema, filter);
+    return this;
+  }
+
+  groupBy(
+    ...keys: readonly OrderByKey<T>[]
+  ): this {
+    for (const key of keys) {
+      this.groupings.push(columnToSQL(key));
+    }
+    return this;
+  }
+
+  having(clause: SQL): this {
+    this.havingClause = clause;
+    return this;
+  }
+
+  orderBy(
+    ...keys: readonly OrderByKey<T>[]
+  ): this {
+    for (const key of keys) {
+      this.orderings.push(columnToSQL(key));
+    }
+    return this;
+  }
+
+  limit(value: number | SQL): this {
+    this.limitClause = sqlTemplate`limit ${value}`;
+    return this;
+  }
+
+  offset(value: number | SQL): this {
+    this.offsetClause = sqlTemplate`offset ${value}`;
+    return this;
+  }
+
+  sql(): SQL {
+    const baseColumns = buildColumnClause(this.mode, this.columnNames);
     const tableIdent = sqlRaw`${sqlIdent(this.table)}`;
-    const distinctClause = options?.distinct ? sqlRaw`DISTINCT ` : sqlRaw``;
-    const base = sqlTemplate`select ${distinctClause}count(*) from ${tableIdent}`;
-    return {
-      where: (filter: SchemaWhereInput<T>) =>
-        sqlTemplate`${base} ${this.where(filter)}`,
-    };
-  }
+    const main = this.mode === "count"
+      ? sqlTemplate`select ${baseColumns} from ${tableIdent}`
+      : sqlTemplate`select ${this.distinctClause}${baseColumns} from ${tableIdent}`;
 
-  where(filter: SchemaWhereInput<T>): SQL {
-    return resolveWhereInput(this.schema, filter);
+    const joinClause = this.joins.length
+      ? joinSQLParts(this.joins.map((join) => buildJoinSQL(join)), " ")
+      : undefined;
+    let statement = joinClause ? sqlTemplate`${main} ${joinClause}` : main;
+    if (this.whereClause) {
+      statement = sqlTemplate`${statement} ${this.whereClause}`;
+    }
+    if (this.groupings.length) {
+      const groupClause = joinSQLParts(this.groupings, ", ");
+      statement = sqlTemplate`${statement} group by ${groupClause}`;
+    }
+    if (this.havingClause) {
+      statement = sqlTemplate`${statement} having ${this.havingClause}`;
+    }
+    if (this.orderings.length) {
+      const orderClause = joinSQLParts(this.orderings, ", ");
+      statement = sqlTemplate`${statement} order by ${orderClause}`;
+    }
+    if (this.limitClause) {
+      statement = sqlTemplate`${statement} ${this.limitClause}`;
+    }
+    if (this.offsetClause) {
+      statement = sqlTemplate`${statement} ${this.offsetClause}`;
+    }
+
+    const withClause = buildWithClause(this.ctes);
+    if (withClause) {
+      return sqlTemplate`${withClause} ${statement}`;
+    }
+    return statement;
   }
 }
 
