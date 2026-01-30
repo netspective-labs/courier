@@ -2,7 +2,9 @@
 import { assert, assertEquals } from "@std/assert";
 import { Courier } from "../connect/core.ts";
 import { SQL } from "../connect/sql-text.ts";
+import { z } from "@zod";
 import "./sqlite.ts";
+import { SchemaSQLBuilder } from "../connect/safe-sql.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -155,6 +157,36 @@ Deno.test(
     }
   },
 );
+
+Deno.test("SchemaSQLBuilder integrates with Courier DML", async () => {
+  const c = await Courier.connect("courier:sqlite::memory:");
+  const builder = new SchemaSQLBuilder(
+    "builder_sql",
+    z.object({
+      id: z.number().int(),
+      label: z.string(),
+    }),
+  );
+
+  await c.exec(
+    "create table builder_sql (id integer primary key, label text not null)",
+  );
+  await c.exec(builder.insert({ id: 1, label: "initial" }));
+  await c.exec(builder.update({ label: "changed" }, { id: 1 }));
+
+  const row = await c.query(SQL`select label from builder_sql where id = ${1}`);
+  const rowData = await row.all();
+  assertEquals(rowData[0][0], "changed");
+  await row.close();
+
+  await c.exec(builder.delete({ id: 1 }));
+  const counts = await c.query(SQL`select count(*) from builder_sql`);
+  const countData = await counts.all();
+  assertEquals(countData[0][0], 0);
+  await counts.close();
+
+  await c.close();
+});
 
 Deno.test(
   "Courier SQLite diagnostics: versions, capabilities, hints, and events",
