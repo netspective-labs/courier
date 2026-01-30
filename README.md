@@ -1,72 +1,89 @@
 # Courier Data Federation Library
 
-Courier is a JDBC-inspired, TypeScript-native data federation library for Deno.  
-It provides a consistent, observable, and performance-first way to connect to multiple data sources using a single API, while embracing modern web and TypeScript idioms instead of Java-style ceremony.
+Courier is a JDBC-inspired, TypeScript-native data federation library for Deno.
+It provides a consistent, observable, and performance-first way to connect to
+multiple data sources using a single API, while embracing modern web and
+TypeScript idioms instead of Java-style ceremony.
 
-Courier is **not an ORM**. It is a thin, principled abstraction over database drivers designed for correctness, performance, and long-term maintainability.
+Courier is **not an ORM**. It is a thin, principled abstraction over database
+drivers designed for correctness, performance, and long-term maintainability.
 
----
+Courier is developed under **Netspective Labs** and reflects Netspective’s
+philosophy of deterministic systems, explicit tradeoffs, and production-grade
+observability.
+
+## Why Courier
+
+Most database libraries fall into one of two traps:
+
+- Low-level drivers that leak vendor complexity everywhere
+- Heavy ORMs that hide too much and fail in edge cases
+
+Courier sits deliberately in the middle:
+
+- One mental model across data sources (JDBC/ODBC-inspired)
+- No leaky abstractions
+- No hidden state
+- No guessing of types
+- No magic
+
+If you understand SQL and data systems, Courier stays out of your way.
 
 ## Design Philosophy
 
-Courier is built around a few non-negotiable ideas.
-
 ### Familiar mental model, modern execution
 
-Courier intentionally mirrors the conceptual shape of JDBC and ODBC:
+Courier mirrors the proven JDBC/ODBC model:
 
-- Drivers register themselves
+- Drivers self-register
 - Connections are created from URLs
-- Queries return results
-- Metadata can be queried
+- Queries return result sets
+- Metadata is queryable
 - Errors are normalized
 
-At the same time, Courier avoids Java-style verbosity. Everything is async, iterable, and composable.
+But Courier removes Java ceremony. Everything is async, iterable, and composable
+using TypeScript-first idioms.
 
 ### Performance first, safety on demand
 
-Courier defaults to **array-based rows** for performance.
+Courier defaults to **array-based rows**, mirroring JDBC’s index-based access
+pattern.
 
-- Arrays mirror JDBC’s index-based access pattern
-- No object allocation overhead by default
+- Fast
+- Predictable
+- Allocation-efficient
 
-Safety is opt-in:
+Type safety is opt-in:
 
-- Consumers can request object rows
-- Consumers can provide typed transforms
-- Drivers never guess types
+- Object rows are requested explicitly
+- Typed transforms are supplied by the consumer
+- Drivers never infer types
 
-Performance is the default; correctness is explicit.
+Performance is the default. Safety is explicit.
 
 ### Web-native observability
 
-Courier uses `EventTarget` and `CustomEvent` instead of logging hooks or callbacks.
+Courier uses `EventTarget` and `CustomEvent`.
 
-Events are emitted at two levels:
+Events are emitted at two scopes:
 
 - Global (`Courier.events`)
 - Per-connection (`connection.events`)
 
-This enables tracing, metrics, auditing, and debugging without modifying driver code.
+This enables tracing, metrics, diagnostics, and audit logging without coupling
+application logic to logging frameworks.
 
 ### Federation, not lowest common denominator
 
-Courier does not attempt to hide database differences.
+Courier does not attempt to homogenize databases.
 
 - Core behavior is uniform
 - Optional features are advertised via capabilities
-- Driver-specific features are explicit
+- Driver-specific behavior is explicit
 
-This avoids fragile abstractions that work poorly everywhere.
-
----
+Courier favors correctness over pretending all databases are the same.
 
 ## Architecture Overview
-
-Courier has two main layers:
-
-1. **Core API** (`courier.ts`)
-2. **Drivers** (for example, `sqlite.ts`)
 
 ```
 Application
@@ -80,108 +97,159 @@ Driver implementation
 Native / Node / Remote DB client
 ```
 
----
+Courier consists of:
+
+- **Core API** (`courier.ts`)
+- **Drivers** (for example `sqlite.ts`)
+
+## Quick Start
+
+### Install
+
+Courier is designed for Deno and modern TypeScript runtimes.
+
+```
+deno add jsr:@netspective-labs/courier
+```
+
+(Or import directly from the repository during development.)
+
+### Connect to SQLite
+
+```ts
+import { Courier } from "./courier.ts";
+import "./sqlite.ts"; // registers the SQLite driver
+
+const conn = await Courier.connect("courier:sqlite::memory:");
+```
+
+### Execute SQL
+
+```ts
+await conn.exec(
+  "create table people (id integer primary key, name text, age integer)",
+);
+
+await conn.exec(
+  "insert into people(name, age) values (?, ?)",
+  ["alice", 41],
+);
+```
+
+### Query with default array rows (fast path)
+
+```ts
+const r = await conn.query("select id, name, age from people");
+const rows = await r.all();
+
+// rows: number[][]
+console.log(rows[0][1]); // "alice"
+```
+
+### Query with typed object rows (safe path)
+
+```ts
+type Person = { id: number; name: string; age: number };
+
+const r = await conn.query("select id, name, age from people");
+const people = await r.all<Person>("object", {
+  transform: (raw) => ({
+    id: Number(raw.id),
+    name: String(raw.name),
+    age: Number(raw.age),
+  }),
+});
+```
+
+### Transactions
+
+```ts
+await conn.tx(async (tx) => {
+  await tx.exec("insert into people(name, age) values (?, ?)", ["bob", 55]);
+});
+```
 
 ## Core API (`courier.ts`)
 
-### Driver registry
+### Driver registry (JDBC: DriverManager)
 
-Drivers register themselves with Courier and declare which URLs they accept.
+Drivers register themselves and declare which URLs they accept. The first
+matching driver is selected.
 
-The first matching driver is used, similar to JDBC’s `DriverManager`, but simpler and explicit.
+### Connections (JDBC: Connection)
 
-### Connections
-
-A `CourierConnection` represents a logical session with a data source.
+A `CourierConnection` represents a logical session.
 
 Responsibilities:
 
-- Execute queries and commands
-- Manage transactions
-- Expose metadata
-- Emit events
-- Advertise capabilities
+- Query and command execution
+- Transaction management
+- Metadata access
+- Event emission
+- Capability advertisement
 
-Low-level vendor access is available only via `unwrap()`.
+Low-level access is available only via `unwrap()`.
 
-### Query execution
+### Queries and commands (JDBC: Statement / PreparedStatement)
 
-Courier exposes two core operations:
+Courier exposes:
 
 - `query(sql, params?, options?)`
 - `exec(sql, params?, options?)`
 
-There is no distinction between statements and prepared statements in v1.  
-Drivers may optimize internally.
+There is no explicit prepared-statement API in v1. Drivers may optimize
+internally.
 
-### Results and row shapes
+### Results (JDBC: ResultSet)
 
-A `CourierResult` represents a stream of rows.
+A `CourierResult` is a stream of rows.
 
-Default behavior:
+- Default: arrays
+- Optional: objects
+- Optional: typed objects via transform
 
-- `rows()` → arrays
-- `all()` → arrays
-- `first()` → array
+Row shape is chosen by the **consumer at read time**.
 
-Opt-in safety:
+### Transactions (JDBC: Transaction management)
 
-- `rows("object")` → objects
-- `rows<T>("object", { transform })` → typed objects
+Transactions are function-scoped:
 
-The **consumer chooses the row shape at read time**, not at query time.
-
-### Typed transforms
-
-Typed transforms are consumer-defined functions that convert raw object rows into domain types.
-
-Courier deliberately avoids automatic type inference.
-
-### Transactions
-
-Transactions are expressed as functions:
-
-```
+```ts
 await conn.tx(async (tx) => {
-  await tx.exec(...)
-  await tx.query(...)
-})
+  ...
+});
 ```
 
-Courier guarantees:
+Courier guarantees commit or rollback.
 
-- Automatic commit on success
-- Automatic rollback on error
-- Optional transaction modes when supported
+### Metadata (JDBC: DatabaseMetaData)
 
-### Metadata
-
-`CourierMeta` exposes a practical subset of database metadata:
+Courier exposes a practical subset:
 
 - Product and driver identity
 - Tables
 - Columns
 - Primary keys
-- Drop-ins (Courier-specific)
+- Drop-ins
 
-All metadata methods are capability-guarded.
+All metadata is capability-guarded.
 
-### Drop-ins
+### Drop-ins (Courier-specific)
 
-Drop-ins are a Courier-specific abstraction that models a simple filesystem stored inside the data source.
+Drop-ins are a database-embedded filesystem abstraction.
 
 Each drop-in has:
 
 - `path`
 - `contents`
-- `elaboration` (optional metadata)
+- `elaboration`
 - `lastModified`
 
-Drop-ins allow configuration, feature flags, and annotations to live inside the database itself.
+They allow configuration and annotations to live inside the database itself.
 
 ### Capabilities
 
-Each connection advertises supported features such as:
+Connections advertise supported features such as:
 
 - transactions
 - streaming
@@ -189,37 +257,32 @@ Each connection advertises supported features such as:
 - drop-ins
 - driver hints
 
-Capabilities allow tools and applications to adapt safely.
+Capabilities allow tools to adapt safely.
 
 ### Events
 
 Courier emits structured events for:
 
 - Driver registration
-- Connection open/close
-- Query execution
-- Command execution
+- Connect / close
+- Query / exec
 - Transactions
 - Errors
 
-Events include timing and sanitized context and are suitable for production observability.
-
----
+Events include timing and sanitized context.
 
 ## SQLite Driver (`sqlite.ts`)
 
-### Why `node:sqlite`
+### Implementation choice
 
 The SQLite driver uses Deno’s built-in `node:sqlite` module.
 
 Benefits:
 
-- No native `.so` downloads
+- No native library downloads
 - No segmentation faults
-- Stable across environments
-- Works reliably with `:memory:` databases
-
-This prioritizes correctness and portability for v1.
+- Reliable `:memory:` usage
+- Predictable behavior across environments
 
 ### URL scheme
 
@@ -229,43 +292,9 @@ Supported forms:
 - `courier:sqlite:file:./db.sqlite`
 - `courier:sqlite:///absolute/or/relative/path.db`
 
-### Query strategy
-
-Internally:
-
-- SQLite yields object rows
-- Courier projects arrays by default using column order
-- Object rows are returned only when requested
-- Typed transforms are applied only when supplied
-
-### Driver hints
-
-The SQLite driver honors `rowMode` hints when possible.
-
-Hints are advisory and never change semantics.
-
-### Transactions
-
-Transactions are implemented using explicit `BEGIN / COMMIT / ROLLBACK`.
-
-Supported modes:
-
-- deferred
-- immediate
-- exclusive
-
-### Metadata
-
-Metadata is implemented using:
-
-- `sqlite_master`
-- `PRAGMA table_info`
-
-This supports tooling, diagnostics, and introspection.
-
 ### Drop-ins table
 
-The SQLite driver creates a table named:
+The driver creates a table named:
 
 ```
 ".courier.d"
@@ -278,13 +307,11 @@ Schema:
 - `elaboration` TEXT (JSON)
 - `lastModified` TEXT (timestamp)
 
-This table acts like a database-embedded configuration directory.
-
----
+This table behaves like a database-embedded configuration directory.
 
 ## Testing
 
-Courier includes a comprehensive test suite that validates:
+The test suite validates:
 
 - Default array row behavior
 - Typed object transforms
@@ -295,24 +322,21 @@ Courier includes a comprehensive test suite that validates:
 - Global and per-connection events
 - Transaction behavior
 
-All tests use `:memory:` SQLite databases for isolation and speed.
+All tests use `:memory:` SQLite databases.
 
----
+## Roadmap
 
-## Extension Guidelines
+Planned and likely future work:
 
-When extending Courier:
+- Additional drivers (PostgreSQL, MySQL, DuckDB)
+- Optional high-performance SQLite FFI driver
+- Driver preference and selection rules
+- Statement caching and reuse
+- Streaming backpressure hints
+- Federated queries across multiple connections
+- Tooling built on Courier metadata and events
 
-- Do not change the default row shape
-- Do not infer types automatically
-- Add features behind capabilities
-- Prefer hints over flags
-- Keep driver contracts minimal
-- Preserve event semantics
-
-If a feature cannot be implemented safely for all drivers, it should not be part of the core API.
-
----
+Courier’s surface area will remain intentionally small.
 
 ## What Courier Is Not
 
@@ -320,12 +344,10 @@ Courier is intentionally not:
 
 - An ORM
 - A query builder
-- A schema migration tool
-- A database abstraction that hides differences
+- A migration framework
+- A “universal SQL” abstraction
 
-Courier is a federation layer with strong guarantees and explicit trade-offs.
-
----
+Courier assumes you know your database and want control.
 
 ## Summary
 
@@ -334,9 +356,9 @@ Courier provides:
 - JDBC-style federation without Java baggage
 - Performance by default
 - Type safety when requested
-- Built-in observability
+- Web-native observability
 - Database-embedded configuration via drop-ins
-- A clean path for future drivers and extensions
+- A clean path for future drivers and federation
 
-Courier is designed to be boring, predictable, and dependable.  
-That is the point.
+Courier is designed to be boring, predictable, and dependable. That is the
+point.

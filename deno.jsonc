@@ -1,0 +1,25 @@
+{
+  "version": "0.1.0",
+  "lock": false,
+
+  "imports": {
+    "@std/path": "jsr:@std/path@1",
+    "@std/fs": "jsr:@std/fs@1",
+    "@std/assert": "jsr:@std/assert@1",
+
+    // Common helpers
+    "@zod": "jsr:@zod/zod@4"
+  },
+
+  "tasks": {
+    "check": "deno check",
+    "fmt": "deno fmt",
+    "lint": "deno lint",
+    "test": "deno test -A lib",
+
+    "sync-import-map": "deno eval --ext ts 'import JSON5 from \"npm:json5@^2\"; const raw = await Deno.readTextFile(\"deno.jsonc\"); const cfg = JSON5.parse(raw); const imports = cfg.imports ?? {}; await Deno.writeTextFile(\"import_map.json\", JSON.stringify({ imports }, null, 2)); console.log(\"import_map.json synced\");' && deno fmt import_map.json",
+    "git-hook-pre-commit": "deno task fmt && deno task lint && deno test --unstable-bundle --parallel --allow-all --v8-flags=\"--max-old-space-size=4096\"",
+    "git-hook-pre-push": "deno test --unstable-bundle --parallel --allow-all --v8-flags=\"--max-old-space-size=4096\"",
+    "prepare-publish": "git semtag final"
+  }
+}
