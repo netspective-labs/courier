@@ -1,6 +1,7 @@
 // lib/connect/safe-sql.ts
 
 import { z } from "@zod";
+import { CourierError, CourierMeta } from "./core.ts";
 import {
   colList,
   isSQL,
@@ -9,7 +10,6 @@ import {
   sqlIdent,
   sqlRaw,
 } from "./sql-text.ts";
-import { CourierError, CourierMeta } from "./core.ts";
 
 export type Dialect = "sqlite" | "postgres" | "generic";
 type LimitValue = number | SQL;
@@ -96,8 +96,10 @@ export type SchemaWhereInput<T extends z.ZodRawShape> =
   | SQL
   | SchemaWhereFilter<T>;
 
-export type SchemaColumnAlias<T extends z.ZodRawShape> =
-  readonly [keyof z.input<z.ZodObject<T>>, string];
+export type SchemaColumnAlias<T extends z.ZodRawShape> = readonly [
+  keyof z.input<z.ZodObject<T>>,
+  string,
+];
 
 export type SchemaSelectColumn<T extends z.ZodRawShape> =
   | keyof z.input<z.ZodObject<T>>
@@ -239,7 +241,7 @@ export function whereClauseFromSchema<T extends z.ZodRawShape>(
 export function insertFromSchema<
   T extends z.ZodRawShape,
 >(
-  table: string,
+  table: TableReference,
   schema: z.ZodObject<T>,
   data: z.input<typeof schema>,
   options?: { returning?: readonly string[] },
@@ -251,7 +253,7 @@ export function insertFromSchema<
   }
   const columns = entries.map(([key]) => key);
   const values = entries.map(([, value]) => value);
-  const tableIdent = sqlRaw`${sqlIdent(table)}`;
+  const tableIdent = tableReferenceToSQL(table);
   const columnList = sqlRaw`${colList(columns)}`;
   let statement =
     sqlTemplate`insert into ${tableIdent} (${columnList}) values (${values})`;
@@ -268,7 +270,7 @@ export function insertFromSchema<
 export function updateFromSchema<
   T extends z.ZodRawShape,
 >(
-  table: string,
+  table: TableReference,
   schema: z.ZodObject<T>,
   changes: Partial<z.input<typeof schema>>,
   where: SchemaWhereInput<T>,
@@ -286,7 +288,7 @@ export function updateFromSchema<
   );
   const setClause = joinSQLParts(parts, ", ");
   const whereClause = resolveWhereInput(schema, where);
-  const tableIdent = sqlRaw`${sqlIdent(table)}`;
+  const tableIdent = tableReferenceToSQL(table);
   let statement =
     sqlTemplate`update ${tableIdent} set ${setClause} ${whereClause}`;
   if (options?.returning?.length) {
@@ -302,13 +304,13 @@ export function updateFromSchema<
 export function deleteFromSchema<
   T extends z.ZodRawShape,
 >(
-  table: string,
+  table: TableReference,
   schema: z.ZodObject<T>,
   where: SchemaWhereInput<T>,
   options?: { returning?: readonly string[] },
 ): SQL {
   const whereClause = resolveWhereInput(schema, where);
-  const tableIdent = sqlRaw`${sqlIdent(table)}`;
+  const tableIdent = tableReferenceToSQL(table);
   let statement = sqlTemplate`delete from ${tableIdent} ${whereClause}`;
   if (options?.returning?.length) {
     statement = sqlTemplate`${statement} returning ${sqlRaw`${
@@ -356,7 +358,9 @@ function columnSpecToSQL<T extends z.ZodRawShape>(
   }
   if (Array.isArray(spec)) {
     const [column, alias] = spec;
-    return sqlTemplate`${sqlRaw`${sqlIdent(String(column))}`} AS ${sqlRaw`${sqlIdent(alias)}`}`;
+    return sqlTemplate`${sqlRaw`${sqlIdent(String(column))}`} AS ${sqlRaw`${
+      sqlIdent(alias)
+    }`}`;
   }
   return sqlTemplate`${sqlRaw`${sqlIdent(String(spec))}`}`;
 }
@@ -386,6 +390,10 @@ function buildJoinSQL(join: JoinDefinition): SQL {
   return sqlTemplate`${joinType} ${aliased} ON ${join.on}`;
 }
 
+function tableReferenceToSQL(table: TableReference): SQL {
+  return isSQL(table) ? table : sqlTemplate`${sqlRaw`${sqlIdent(table)}`}`;
+}
+
 function buildWithClause(ctes: readonly CTEClause[]): SQL | undefined {
   if (!ctes.length) {
     return undefined;
@@ -394,7 +402,9 @@ function buildWithClause(ctes: readonly CTEClause[]): SQL | undefined {
     const columns = cte.columns?.length
       ? sqlTemplate`(${sqlRaw`${colList(cte.columns)}`})`
       : sqlRaw``;
-    return sqlTemplate`${sqlRaw`${sqlIdent(cte.alias)}`}${columns} AS (${cte.query})`;
+    return sqlTemplate`${sqlRaw`${
+      sqlIdent(cte.alias)
+    }`}${columns} AS (${cte.query})`;
   });
   const clause = joinSQLParts(parts, ", ");
   return sqlTemplate`WITH ${clause}`;
@@ -411,7 +421,7 @@ function columnToSQL<T extends z.ZodRawShape>(
 
 export class SchemaSQLBuilder<T extends z.ZodRawShape> {
   constructor(
-    public readonly table: string,
+    public readonly table: TableReference,
     public readonly schema: z.ZodObject<T>,
   ) {}
 
@@ -477,7 +487,7 @@ export class SchemaSelectBuilder<T extends z.ZodRawShape> {
   private offsetValue?: LimitValue;
 
   constructor(
-    private readonly table: string,
+    private readonly table: TableReference,
     private readonly schema: z.ZodObject<T>,
     columns?: readonly SchemaSelectColumn<T>[],
     options?: SchemaSelectOptions,
@@ -580,10 +590,10 @@ export class SchemaSelectBuilder<T extends z.ZodRawShape> {
 
   sql(): SQL {
     const baseColumns = buildColumnClause(this.mode, this.columns);
-    const tableIdent = sqlRaw`${sqlIdent(this.table)}`;
+    const tableExpr = tableReferenceToSQL(this.table);
     const main = this.mode === "count"
-      ? sqlTemplate`select ${baseColumns} from ${tableIdent}`
-      : sqlTemplate`select ${this.distinctClause}${baseColumns} from ${tableIdent}`;
+      ? sqlTemplate`select ${baseColumns} from ${tableExpr}`
+      : sqlTemplate`select ${this.distinctClause}${baseColumns} from ${tableExpr}`;
 
     const joinClause = this.joins.length
       ? joinSQLParts(this.joins.map((join) => buildJoinSQL(join)), " ")

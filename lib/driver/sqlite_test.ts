@@ -1,10 +1,14 @@
 // courier_test.ts
 import { assert, assertEquals } from "@std/assert";
-import { Courier } from "../connect/core.ts";
-import { SQL } from "../connect/sql-text.ts";
 import { z } from "@zod";
-import "./sqlite.ts";
+import {
+  Courier,
+  courierDropInSchema,
+  type CourierDropInSQL,
+} from "../connect/core.ts";
 import { SchemaSQLBuilder } from "../connect/safe-sql.ts";
+import { SQL } from "../connect/sql-text.ts";
+import "./sqlite.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -53,15 +57,26 @@ Deno.test(
     assertEquals(p.age, 55);
     await r2.close();
 
-    // Drop-ins stored in ".courier.d"
-    await c.exec(
-      `insert into ".courier.d"(path, contents, elaboration) values (?, ?, ?)`,
-      [
-        "config/app.json",
-        JSON.stringify({ mode: "test" }),
-        JSON.stringify({ purpose: "unit-test" }),
-      ],
+    const dropInsBuilder: CourierDropInSQL = new SchemaSQLBuilder(
+      SQL`".courier.d"`,
+      courierDropInSchema,
     );
+    const dropInPayload = {
+      path: "config/app.json",
+      contents: JSON.stringify({ mode: "test" }),
+      lastModified: new Date(),
+    };
+    await c.exec(dropInsBuilder.insert(dropInPayload));
+    const dropInQuery = dropInsBuilder
+      .select(["path", "contents"])
+      .where({ path: dropInPayload.path })
+      .sql();
+    const dropInResult = await c.query(dropInQuery);
+    const dropInRows = await dropInResult.all();
+    assertEquals(dropInRows.length, 1);
+    assertEquals(dropInRows[0][0], dropInPayload.path);
+    assertEquals(dropInRows[0][1], dropInPayload.contents);
+    await dropInResult.close();
 
     const m = await c.meta();
     assert(m.dropIns);
@@ -209,7 +224,6 @@ Deno.test("SchemaSQLBuilder integrates with Courier DML", async () => {
   const countData = await counts.all();
   assertEquals(countData[0][0], 0);
   await counts.close();
-
 
   await c.close();
 });

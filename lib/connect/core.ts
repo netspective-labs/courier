@@ -116,12 +116,14 @@
  * 6) When adding new events, keep payloads serializable and avoid leaking secrets.
  */
 
+import { z } from "@zod";
+import type { SchemaSQLBuilder } from "./safe-sql.ts";
 import {
   isSQL,
-  toSQLQuery,
   type SQL,
   type SQLQuery,
   type SQLTextInput,
+  toSQLQuery,
 } from "./sql-text.ts";
 
 export type CourierRowObject = Readonly<Record<string, unknown>>;
@@ -187,12 +189,19 @@ export type CourierMetaPrimaryKeysQuery = Readonly<{
   table: string;
 }>;
 
-export type CourierDropIn = Readonly<{
-  path: string;
-  contents: unknown;
-  elaboration?: Record<string, unknown>;
-  lastModified: Date;
-}>;
+export const courierDropInSchema = z.object({
+  path: z.string(),
+  contents: z.unknown(),
+  elaboration: z
+    .record(z.string(), z.unknown())
+    .optional(),
+  lastModified: z.date(),
+});
+
+export type CourierDropIn = z.infer<typeof courierDropInSchema>;
+export type CourierDropInSQL = SchemaSQLBuilder<
+  typeof courierDropInSchema extends z.ZodObject<infer S> ? S : never
+>;
 
 export type CourierMeta = Readonly<{
   product: { name: string; version?: string };
@@ -287,7 +296,10 @@ export type CourierConnection = Readonly<{
     options?: CourierQueryOptions,
   ): Promise<CourierExecResult>;
   exec(sql: SQL, options?: CourierQueryOptions): Promise<CourierExecResult>;
-  exec(sql: SQLQuery, options?: CourierQueryOptions): Promise<CourierExecResult>;
+  exec(
+    sql: SQLQuery,
+    options?: CourierQueryOptions,
+  ): Promise<CourierExecResult>;
 
   tx<T>(
     fn: (c: CourierConnection) => Promise<T>,

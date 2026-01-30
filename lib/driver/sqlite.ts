@@ -25,6 +25,7 @@ import {
   type CourierCapabilities,
   type CourierConnection,
   type CourierDropIn,
+  courierDropInSchema,
   CourierError,
   type CourierExecResult,
   type CourierFeature,
@@ -41,9 +42,9 @@ import {
 
 import {
   isSQL,
-  toSQLQuery,
   type SQL,
   type SQLQuery,
+  toSQLQuery,
 } from "../connect/sql-text.ts";
 
 /* ---------------------------------------------
@@ -75,18 +76,27 @@ function parseSqliteUrl(url: string): string {
  * Helpers
  * ------------------------------------------- */
 
+function normalizeParamValue(v: unknown): SQLInputValue {
+  if (v instanceof Date) return v.toISOString();
+  return v as SQLInputValue;
+}
+
 function toSqlNamedParams(
   params?: CourierParams,
 ): Record<string, SQLInputValue> | undefined {
   if (!params || Array.isArray(params)) return undefined;
-  return params as Record<string, SQLInputValue>;
+  const normalized: Record<string, SQLInputValue> = {};
+  for (const [key, value] of Object.entries(params)) {
+    normalized[key] = normalizeParamValue(value);
+  }
+  return normalized;
 }
 
 function toSqlPositionalParams(
   params?: CourierParams,
 ): readonly SQLInputValue[] | undefined {
   if (!params || !Array.isArray(params)) return undefined;
-  return params as readonly SQLInputValue[];
+  return params.map((v) => normalizeParamValue(v)) as readonly SQLInputValue[];
 }
 
 function iterateRowsWithParams(
@@ -319,7 +329,10 @@ class SqliteCourierConnection implements CourierConnection {
     return Promise.resolve();
   }
 
-  query(sql: string | SQL | SQLQuery, params?: CourierParams): Promise<CourierResult> {
+  query(
+    sql: string | SQL | SQLQuery,
+    params?: CourierParams,
+  ): Promise<CourierResult> {
     try {
       const normalized = normalizeSqlInput(sql, params);
       const stmt = this.#db.prepare(normalized.text);
@@ -329,7 +342,10 @@ class SqliteCourierConnection implements CourierConnection {
     }
   }
 
-  exec(sql: string | SQL | SQLQuery, params?: CourierParams): Promise<CourierExecResult> {
+  exec(
+    sql: string | SQL | SQLQuery,
+    params?: CourierParams,
+  ): Promise<CourierExecResult> {
     try {
       const normalized = normalizeSqlInput(sql, params);
       const stmt = this.#db.prepare(normalized.text);
@@ -423,13 +439,13 @@ class SqliteCourierConnection implements CourierConnection {
             const path = typeof r.path === "string"
               ? r.path
               : String(r.path ?? "");
-            const di: CourierDropIn = {
+            const parsed = courierDropInSchema.parse({
               path,
               contents: r.contents,
               elaboration: parseElaboration(r.elaboration),
               lastModified: toDate(r.lastModified),
-            };
-            if (!filter || filter(di)) yield di;
+            });
+            if (!filter || filter(parsed)) yield parsed;
           }
         }
 
