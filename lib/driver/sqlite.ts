@@ -39,6 +39,13 @@ import {
   toCourierError,
 } from "../connect/core.ts";
 
+import {
+  isSQL,
+  toSQLQuery,
+  type SQL,
+  type SQLQuery,
+} from "../connect/sql-text.ts";
+
 /* ---------------------------------------------
  * URL parsing
  * ------------------------------------------- */
@@ -108,6 +115,25 @@ function runStatementWithParams(
     return stmt.run(...args);
   }
   return stmt.run();
+}
+
+function normalizeSqlInput(
+  sql: string | SQL | SQLQuery,
+  params?: CourierParams,
+): { text: string; params?: CourierParams } {
+  if (typeof sql === "string") {
+    return { text: sql, params };
+  }
+  if (params !== undefined) {
+    throw new CourierError(
+      "Cannot supply positional or named params when executing a SQL tagged template/query object",
+      { code: "SYNTAX", sqlState: "0A000" },
+    );
+  }
+  const normalized = isSQL(sql)
+    ? toSQLQuery(sql, { identifier: () => "?" })
+    : toSQLQuery(sql);
+  return { text: normalized.text, params: normalized.values };
 }
 
 /* ---------------------------------------------
@@ -293,19 +319,21 @@ class SqliteCourierConnection implements CourierConnection {
     return Promise.resolve();
   }
 
-  query(sql: string, params?: CourierParams): Promise<CourierResult> {
+  query(sql: string | SQL | SQLQuery, params?: CourierParams): Promise<CourierResult> {
     try {
-      const stmt = this.#db.prepare(sql);
-      return Promise.resolve(new SqliteCourierResult(stmt, params));
+      const normalized = normalizeSqlInput(sql, params);
+      const stmt = this.#db.prepare(normalized.text);
+      return Promise.resolve(new SqliteCourierResult(stmt, normalized.params));
     } catch (e) {
       throw toCourierError(e);
     }
   }
 
-  exec(sql: string, params?: CourierParams): Promise<CourierExecResult> {
+  exec(sql: string | SQL | SQLQuery, params?: CourierParams): Promise<CourierExecResult> {
     try {
-      const stmt = this.#db.prepare(sql);
-      const result = runStatementWithParams(stmt, params);
+      const normalized = normalizeSqlInput(sql, params);
+      const stmt = this.#db.prepare(normalized.text);
+      const result = runStatementWithParams(stmt, normalized.params);
       return Promise.resolve({ changes: Number(result.changes) });
     } catch (e) {
       throw toCourierError(e);

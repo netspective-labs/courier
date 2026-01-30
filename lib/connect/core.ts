@@ -1,5 +1,6 @@
 // lib/courier/courier.ts
 /**
+ * @module core
  * Courier Data Federation Library (Courier)
  *
  * Purpose
@@ -114,6 +115,14 @@
  * 5) Never break the default behavior: `result.rows()` must yield arrays in stable column order.
  * 6) When adding new events, keep payloads serializable and avoid leaking secrets.
  */
+
+import {
+  isSQL,
+  toSQLQuery,
+  type SQL,
+  type SQLQuery,
+  type SQLTextInput,
+} from "./sql-text.ts";
 
 export type CourierRowObject = Readonly<Record<string, unknown>>;
 export type CourierRowArray = readonly unknown[];
@@ -270,11 +279,15 @@ export type CourierConnection = Readonly<{
     params?: CourierParams,
     options?: CourierQueryOptions,
   ): Promise<CourierResult>;
+  query(sql: SQL, options?: CourierQueryOptions): Promise<CourierResult>;
+  query(sql: SQLQuery, options?: CourierQueryOptions): Promise<CourierResult>;
   exec(
     sql: string,
     params?: CourierParams,
     options?: CourierQueryOptions,
   ): Promise<CourierExecResult>;
+  exec(sql: SQL, options?: CourierQueryOptions): Promise<CourierExecResult>;
+  exec(sql: SQLQuery, options?: CourierQueryOptions): Promise<CourierExecResult>;
 
   tx<T>(
     fn: (c: CourierConnection) => Promise<T>,
@@ -384,6 +397,23 @@ export class CourierError extends Error {
   }
 }
 
+function normalizeSqlInput(
+  sql: SQLTextInput,
+  params?: CourierParams,
+): { text: string; params?: CourierParams } {
+  if (typeof sql === "string") {
+    return { text: sql, params };
+  }
+  if (params !== undefined) {
+    throw new CourierError(
+      "Cannot provide positional or named parameters when executing a SQL tagged template/query object",
+      { code: "SYNTAX", sqlState: "0A000" },
+    );
+  }
+  const normalized = toSQLQuery(sql);
+  return { text: normalized.text, params: normalized.values };
+}
+
 export class CourierFeatureNotSupportedError extends CourierError {
   constructor(message = "Feature not supported") {
     super(message, { code: "NOT_SUPPORTED", sqlState: "0A000" });
@@ -485,21 +515,38 @@ export const Courier = (() => {
           capabilities: conn.capabilities,
           events: connEvents,
 
-          query: async (sql, params, opts) => {
+          query: async (
+            sql: string | SQL | SQLQuery,
+            params?: CourierParams,
+            opts?: CourierQueryOptions,
+          ) => {
+            const normalized = normalizeSqlInput(sql, params);
             abortIfNeeded(opts?.signal);
             const t1 = performance.now();
             try {
+              let driverPromise: Promise<CourierResult>;
+              if (typeof sql === "string") {
+                driverPromise = conn.query(
+                  normalized.text,
+                  normalized.params,
+                  opts,
+                );
+              } else if (isSQL(sql)) {
+                driverPromise = conn.query(sql, opts);
+              } else {
+                driverPromise = conn.query(sql, opts);
+              }
               const res = await withTimeout(
-                conn.query(sql, params, opts),
+                driverPromise,
                 opts?.timeoutMs,
                 opts?.signal,
               );
               const dt1 = performance.now() - t1;
-              const kind = paramsKind(params);
+              const kind = paramsKind(normalized.params);
               const payload = {
                 url,
                 driver: { name: driver.name, version: driver.version },
-                sql,
+                sql: normalized.text,
                 paramsKind: kind,
                 tag: opts?.tag,
                 durationMs: dt1,
@@ -517,7 +564,7 @@ export const Courier = (() => {
               const payload = {
                 url,
                 driver: { name: driver.name, version: driver.version },
-                sql,
+                sql: normalized.text,
                 tag: opts?.tag,
                 error: err,
               };
@@ -531,21 +578,38 @@ export const Courier = (() => {
             }
           },
 
-          exec: async (sql, params, opts) => {
+          exec: async (
+            sql: string | SQL | SQLQuery,
+            params?: CourierParams,
+            opts?: CourierQueryOptions,
+          ) => {
+            const normalized = normalizeSqlInput(sql, params);
             abortIfNeeded(opts?.signal);
             const t1 = performance.now();
             try {
+              let driverPromise: Promise<CourierExecResult>;
+              if (typeof sql === "string") {
+                driverPromise = conn.exec(
+                  normalized.text,
+                  normalized.params,
+                  opts,
+                );
+              } else if (isSQL(sql)) {
+                driverPromise = conn.exec(sql, opts);
+              } else {
+                driverPromise = conn.exec(sql, opts);
+              }
               const out = await withTimeout(
-                conn.exec(sql, params, opts),
+                driverPromise,
                 opts?.timeoutMs,
                 opts?.signal,
               );
               const dt1 = performance.now() - t1;
-              const kind = paramsKind(params);
+              const kind = paramsKind(normalized.params);
               const payload = {
                 url,
                 driver: { name: driver.name, version: driver.version },
-                sql,
+                sql: normalized.text,
                 paramsKind: kind,
                 tag: opts?.tag,
                 durationMs: dt1,
@@ -563,7 +627,7 @@ export const Courier = (() => {
               const payload = {
                 url,
                 driver: { name: driver.name, version: driver.version },
-                sql,
+                sql: normalized.text,
                 tag: opts?.tag,
                 error: err,
               };

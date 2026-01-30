@@ -1,7 +1,11 @@
 // courier_test.ts
 import { assert, assertEquals } from "@std/assert";
 import { Courier } from "../connect/core.ts";
+import { SQL } from "../connect/sql-text.ts";
 import "./sqlite.ts";
+
+// deno-lint-ignore no-explicit-any
+type Any = any;
 
 Deno.test(
   "Courier SQLite driver (:memory:) supports arrays default, typed object transform, and drop-ins",
@@ -66,6 +70,89 @@ Deno.test(
     assert(dropIns[0].lastModified instanceof Date);
 
     await c.close();
+  },
+);
+
+Deno.test("Courier SQLite driver accepts SQL tagged templates", async () => {
+  const c = await Courier.connect("courier:sqlite::memory:");
+  await c.exec(
+    "create table template_sql(id integer primary key, label text not null)",
+  );
+  await c.exec(
+    SQL`insert into template_sql(label) values (${"templated"})`,
+  );
+  const r = await c.query(
+    SQL`select label from template_sql where label = ${"templated"}`,
+  );
+  const rows = await r.all();
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0][0], "templated");
+  await r.close();
+  await c.close();
+});
+
+Deno.test(
+  "Courier SQLite driver emits Courier events when executing SQL tagged templates",
+  async () => {
+    const captured: Array<{ type: string; detail: unknown }> = [];
+    const watch = (type: string) =>
+      ((ev: Event) => {
+        const ce = ev as CustomEvent;
+        captured.push({ type, detail: ce.detail });
+      }) as EventListener;
+
+    const handlers = [
+      { type: "courier:exec", handler: watch("courier:exec") },
+      { type: "courier:query", handler: watch("courier:query") },
+    ];
+    for (const { type, handler } of handlers) {
+      Courier.events.addEventListener(type, handler);
+    }
+
+    const c = await Courier.connect("courier:sqlite::memory:");
+    try {
+      await c.exec(
+        SQL`create table template_sql(id integer primary key, label text not null)`,
+      );
+      await c.exec(
+        SQL`insert into template_sql(label) values (${"templated"})`,
+      );
+      const q = await c.query(
+        SQL`select label from template_sql where label = ${"templated"}`,
+      );
+      await q.all();
+      await q.close();
+
+      const execEvents = captured.filter(
+        (e) =>
+          e.type === "courier:exec" &&
+          ((e.detail as Any).sql ?? "").includes("template_sql"),
+      );
+      assert(
+        execEvents.some(
+          (e) =>
+            (e.detail as Any).sql ===
+              "insert into template_sql(label) values ($1)",
+        ),
+      );
+
+      const queryEvents = captured.filter(
+        (e) =>
+          e.type === "courier:query" &&
+          ((e.detail as Any).sql ?? "").includes("select label"),
+      );
+      assertEquals(queryEvents.length, 1);
+      assertEquals(
+        (queryEvents[0].detail as Any).sql,
+        "select label from template_sql where label = $1",
+      );
+      assertEquals((queryEvents[0].detail as Any).paramsKind, "array");
+    } finally {
+      for (const { type, handler } of handlers) {
+        Courier.events.removeEventListener(type, handler);
+      }
+      await c.close();
+    }
   },
 );
 
