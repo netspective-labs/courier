@@ -174,13 +174,17 @@ Deno.test("SchemaSQLBuilder integrates with Courier DML", async () => {
   await c.exec(builder.insert({ id: 1, label: "initial" }));
   await c.exec(builder.update({ label: "changed" }, { id: 1 }));
 
-  const row = await c.query(SQL`select label from builder_sql where id = ${1}`);
+  const row = await c.query(
+    builder.select(["label"]).where({ id: 1 }),
+  );
   const rowData = await row.all();
   assertEquals(rowData[0][0], "changed");
   await row.close();
 
   await c.exec(builder.delete({ id: 1 }));
-  const counts = await c.query(SQL`select count(*) from builder_sql`);
+  const counts = await c.query(
+    builder.count().where({ id: 1 }),
+  );
   const countData = await counts.all();
   assertEquals(countData[0][0], 0);
   await counts.close();

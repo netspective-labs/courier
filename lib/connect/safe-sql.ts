@@ -25,9 +25,32 @@ export type SchemaToZodOptions = {
   partial?: boolean;
 };
 
+export type Operator =
+  | "lt"
+  | "lte"
+  | "gt"
+  | "gte"
+  | "ne"
+  | "eq";
+
+export type OperatorValue<V> = {
+  op: Operator;
+  value: V;
+};
+
+export type SchemaWhereFilter<
+  T extends z.ZodRawShape,
+> = Partial<
+  {
+    [K in keyof z.input<z.ZodObject<T>>]:
+      | z.input<z.ZodObject<T>>[K]
+      | OperatorValue<z.input<z.ZodObject<T>>[K]>;
+  }
+>;
+
 export type SchemaWhereInput<T extends z.ZodRawShape> =
   | SQL
-  | Partial<z.input<z.ZodObject<T>>>;
+  | SchemaWhereFilter<T>;
 
 const DEFAULT_TYPE = z.unknown();
 
@@ -87,20 +110,56 @@ export async function zodSchemaFromMeta(
   return columnsToZodSchema(columns as readonly SchemaColumnInfo[], opts);
 }
 
+function isOperatorValue<V>(
+  v: unknown,
+): v is { op: Operator; value: V } {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    "op" in v &&
+    "value" in (v as Record<string, unknown>)
+  );
+}
+
+function conditionSQL(
+  key: string,
+  operand: unknown,
+): SQL {
+  if (isSQL(operand)) {
+    return operand;
+  }
+  if (isOperatorValue(operand)) {
+    const opMap: Record<Operator, string> = {
+      eq: "=",
+      ne: "<>",
+      lt: "<",
+      lte: "<=",
+      gt: ">",
+      gte: ">=",
+    };
+    const sqlOp = opMap[operand.op] ?? "=";
+    const opRaw = sqlRaw`${sqlOp}`;
+    return sqlTemplate`${sqlRaw`${sqlIdent(key)}`} ${opRaw} ${operand.value}`;
+  }
+  return sqlTemplate`${sqlRaw`${sqlIdent(key)}`} = ${operand}`;
+}
+
 export function whereClauseFromSchema<T extends z.ZodRawShape>(
   schema: z.ZodObject<T>,
-  filter: Partial<z.input<typeof schema>>,
+  filter: SchemaWhereFilter<T>,
 ): SQL {
-  const parsed = schema.partial().parse(filter);
-  const entries = Object.entries(parsed).filter(([, value]) =>
+  const entries = Object.entries(filter).filter(([, value]) =>
     value !== undefined
   );
+  const normalized: Record<string, unknown> = {};
+  for (const [key, value] of entries) {
+    normalized[key] = isOperatorValue(value) ? value.value : value;
+  }
+  schema.partial().parse(normalized);
   if (!entries.length) {
     throw new CourierError("WHERE clause cannot be empty");
   }
-  const parts = entries.map(([key, value]) =>
-    sqlTemplate`${sqlRaw`${sqlIdent(key)}`} = ${value}`
-  );
+  const parts = entries.map(([key, value]) => conditionSQL(key, value));
   const clause = joinSQLParts(parts, " AND ");
   return sqlTemplate`WHERE ${clause}`;
 }
@@ -217,7 +276,42 @@ export class SchemaSQLBuilder<T extends z.ZodRawShape> {
     return deleteFromSchema(this.table, this.schema, where, options);
   }
 
+  select<K extends readonly (keyof z.input<typeof this.schema>)[]>(
+    columns?: K,
+    options?: { distinct?: boolean },
+  ) {
+    const tableIdent = sqlRaw`${sqlIdent(this.table)}`;
+    const columnNames = columns && columns.length
+      ? columns.map((col) => String(col))
+      : undefined;
+    const columnClause = columnNames
+      ? sqlRaw`${colList(columnNames)}`
+      : sqlRaw`*`;
+    const distinctClause = options?.distinct ? sqlRaw`DISTINCT ` : sqlRaw``;
+    const base = sqlTemplate`select ${distinctClause}${columnClause} from ${tableIdent}`;
+    return {
+      where: (filter: SchemaWhereInput<T>) =>
+        sqlTemplate`${base} ${this.where(filter)}`,
+    };
+  }
+
+  count(options?: { distinct?: boolean }) {
+    const tableIdent = sqlRaw`${sqlIdent(this.table)}`;
+    const distinctClause = options?.distinct ? sqlRaw`DISTINCT ` : sqlRaw``;
+    const base = sqlTemplate`select ${distinctClause}count(*) from ${tableIdent}`;
+    return {
+      where: (filter: SchemaWhereInput<T>) =>
+        sqlTemplate`${base} ${this.where(filter)}`,
+    };
+  }
+
   where(filter: SchemaWhereInput<T>): SQL {
     return resolveWhereInput(this.schema, filter);
   }
 }
+
+export const lt = <V>(value: V): OperatorValue<V> => ({ op: "lt", value });
+export const lte = <V>(value: V): OperatorValue<V> => ({ op: "lte", value });
+export const gt = <V>(value: V): OperatorValue<V> => ({ op: "gt", value });
+export const gte = <V>(value: V): OperatorValue<V> => ({ op: "gte", value });
+export const ne = <V>(value: V): OperatorValue<V> => ({ op: "ne", value });
