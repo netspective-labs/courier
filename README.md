@@ -85,16 +85,12 @@ Courier favors correctness over pretending all databases are the same.
 
 ## Architecture Overview
 
-```
-Application
-   ↓
-Courier (registry, events, wrappers)
-   ↓
-CourierConnection
-   ↓
-Driver implementation
-   ↓
-Native / Node / Remote DB client
+```mermaid
+flowchart TD
+  A[Application] --> B[Courier registry, events, wrappers]
+  B --> C[CourierConnection]
+  C --> D[Native / Node / Remote DB client]
+  D --> E[Database]
 ```
 
 Courier consists of:

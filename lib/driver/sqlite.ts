@@ -37,7 +37,7 @@ import {
   type CourierRowShape,
   type CourierTxOptions,
   toCourierError,
-} from "./courier.ts";
+} from "../connect/core.ts";
 
 /* ---------------------------------------------
  * URL parsing

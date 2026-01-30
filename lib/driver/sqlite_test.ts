@@ -1,6 +1,6 @@
 // courier_test.ts
 import { assert, assertEquals } from "@std/assert";
-import { Courier } from "./courier.ts";
+import { Courier } from "../connect/core.ts";
 import "./sqlite.ts";
 
 Deno.test(
