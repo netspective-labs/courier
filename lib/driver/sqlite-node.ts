@@ -1,3 +1,4 @@
+// lib/driver/sqlite-node.ts
 /**
  * Courier SQLite Driver (node:sqlite)
  *

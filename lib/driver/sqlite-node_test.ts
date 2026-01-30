@@ -1,4 +1,4 @@
-// courier_test.ts
+// lib/driver/sqlite-node_test.ts
 import { assert, assertEquals } from "@std/assert";
 import { z } from "@zod";
 import {
@@ -8,7 +8,7 @@ import {
 } from "../connect/core.ts";
 import { SchemaSQLBuilder } from "../connect/safe-sql.ts";
 import { SQL } from "../connect/sql-text.ts";
-import "./sqlite.ts";
+import "./sqlite-node.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
